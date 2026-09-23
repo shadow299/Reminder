@@ -1,0 +1,143 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (default: v1.0.<run_number>)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Build standalone executables for Linux and Windows
+  # ---------------------------------------------------------------------
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+            artifact: Reminder-linux-x86_64.tar.gz
+            bin: Reminder
+          - os: windows-latest
+            name: windows
+            artifact: Reminder-windows-x86_64.zip
+            bin: Reminder.exe
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      # PySide6 apps need a few extra Qt/xcb libs at runtime on Linux.
+      # These are only needed on end-user machines, but installing them
+      # here means CI's own import checks (if any) don't break either.
+      - name: Install Linux system libs
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-sync1 libxcb-xfixes0 libxcb-xkb1 libegl1 libgl1
+
+      - name: Build with PyInstaller
+        run: >
+          pyinstaller
+          --noconfirm --clean --onefile --windowed
+          --name Reminder
+          --collect-submodules app
+          main.py
+
+      - name: Verify build
+        shell: bash
+        run: |
+          ls -lh dist
+          test -f "dist/${{ matrix.bin }}"
+
+      - name: Package (Linux)
+        if: matrix.name == 'linux'
+        run: |
+          chmod +x "dist/${{ matrix.bin }}"
+          tar -C dist -czf "${{ matrix.artifact }}" "${{ matrix.bin }}"
+
+      - name: Package (Windows)
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/${{ matrix.bin }}" -DestinationPath "${{ matrix.artifact }}" -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------
+  # Publish a GitHub Release with the built artifacts
+  # ---------------------------------------------------------------------
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh dist
+
+      - name: Compute release tag
+        id: tag
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="v1.0.${{ github.run_number }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $TAG"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Reminder ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/Reminder-linux-x86_64.tar.gz
+            dist/Reminder-windows-x86_64.zip
