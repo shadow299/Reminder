@@ -29,12 +29,12 @@ jobs:
         include:
           - os: ubuntu-latest
             name: linux
-            artifact: Reminder-linux-x86_64.tar.gz
-            bin: Reminder
+            bin_name: Reminder-linux-x86_64
+            asset: Reminder-linux-x86_64
           - os: windows-latest
             name: windows
-            artifact: Reminder-windows-x86_64.zip
-            bin: Reminder.exe
+            bin_name: Reminder-windows-x86_64
+            asset: Reminder-windows-x86_64.exe
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -53,8 +53,6 @@ jobs:
           python -m pip install -r requirements.txt pyinstaller
 
       # PySide6 apps need a few extra Qt/xcb libs at runtime on Linux.
-      # These are only needed on end-user machines, but installing them
-      # here means CI's own import checks (if any) don't break either.
       - name: Install Linux system libs
         if: matrix.name == 'linux'
         run: |
@@ -68,38 +66,46 @@ jobs:
         run: >
           pyinstaller
           --noconfirm --clean --onefile --windowed
-          --name Reminder
+          --name ${{ matrix.bin_name }}
           --collect-submodules app
           main.py
 
-      - name: Verify build
+      - name: Verify build (Linux)
+        if: matrix.name == 'linux'
         shell: bash
         run: |
           ls -lh dist
-          test -f "dist/${{ matrix.bin }}"
+          test -f "dist/${{ matrix.bin_name }}"
+          chmod +x "dist/${{ matrix.bin_name }}"
 
-      - name: Package (Linux)
-        if: matrix.name == 'linux'
-        run: |
-          chmod +x "dist/${{ matrix.bin }}"
-          tar -C dist -czf "${{ matrix.artifact }}" "${{ matrix.bin }}"
-
-      - name: Package (Windows)
+      - name: Verify build (Windows)
         if: matrix.name == 'windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist/${{ matrix.bin }}" -DestinationPath "${{ matrix.artifact }}" -Force
+          Get-ChildItem dist
+          if (-not (Test-Path "dist/${{ matrix.bin_name }}.exe")) { exit 1 }
+
+      - name: Stage asset
+        shell: bash
+        run: |
+          mkdir -p out
+          if [ "${{ matrix.name }}" = "windows" ]; then
+            cp "dist/${{ matrix.bin_name }}.exe" "out/${{ matrix.asset }}"
+          else
+            cp "dist/${{ matrix.bin_name }}" "out/${{ matrix.asset }}"
+          fi
+          ls -lh out
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          name: ${{ matrix.asset }}
+          path: out/${{ matrix.asset }}
           if-no-files-found: error
           retention-days: 14
 
   # ---------------------------------------------------------------------
-  # Publish a GitHub Release with the built artifacts
+  # Publish a GitHub Release with the built executables (no archive)
   # ---------------------------------------------------------------------
   release:
     name: Publish release
@@ -139,5 +145,5 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            dist/Reminder-linux-x86_64.tar.gz
-            dist/Reminder-windows-x86_64.zip
+            dist/Reminder-linux-x86_64
+            dist/Reminder-windows-x86_64.exe
