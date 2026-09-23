@@ -386,6 +386,57 @@ def stylesheet(p: Palette) -> str:
         margin: 4px 6px;
     }}
 
+    /* -------- calendar -------- */
+    QCalendarWidget {{
+        background: transparent;
+    }}
+    QCalendarWidget QWidget#qt_calendar_navigationbar {{
+        background: transparent;
+        min-height: 30px;
+    }}
+    QCalendarWidget QToolButton {{
+        background: transparent;
+        color: {p.text};
+        border: none;
+        border-radius: 6px;
+        padding: 4px 8px;
+        margin: 2px;
+        font-weight: 600;
+    }}
+    QCalendarWidget QToolButton:hover {{
+        background: {p.card_hover};
+    }}
+    QCalendarWidget QToolButton::menu-indicator {{
+        image: none;
+    }}
+    QCalendarWidget QSpinBox {{
+        background: {p.card};
+        color: {p.text};
+        border: 1px solid {p.border};
+        border-radius: 6px;
+        padding: 2px 4px;
+    }}
+    QCalendarWidget QMenu {{
+        background: {p.card};
+        color: {p.text};
+        border: 1px solid {p.border};
+    }}
+    QCalendarWidget QAbstractItemView {{
+        background: transparent;
+        color: {p.text};
+        selection-background-color: {p.accent};
+        selection-color: white;
+        outline: 0;
+        border: none;
+        gridline-color: transparent;
+    }}
+    QCalendarWidget QAbstractItemView:disabled {{
+        color: {p.text_faint};
+    }}
+    QCalendarWidget QAbstractItemView:enabled {{
+        color: {p.text};
+    }}
+
     /* -------- scrollbar -------- */
     QScrollBar:vertical {{
         background: transparent;

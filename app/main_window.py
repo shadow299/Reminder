@@ -1,13 +1,28 @@
 """Main window: sidebar, list panel, quick add, tray icon, notifications."""
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, time as _time
 from typing import Callable, Optional
 
-from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
+from PySide6.QtCore import QDate, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (
+    QAction,
+    QBrush,
+    QColor,
+    QFont,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPalette,
+    QPen,
+    QPixmap,
+    QShortcut,
+    QTextCharFormat,
+)
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
+    QCalendarWidget,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -35,11 +50,12 @@ from .widgets import ReminderCard, ReminderEditor, ask_new_category
 # Filter definitions
 # ---------------------------------------------------------------------------
 
-FILTER_ALL       = "all"
-FILTER_TODAY     = "today"
-FILTER_SCHEDULED = "scheduled"
-FILTER_IMPORTANT = "important"
-FILTER_COMPLETED = "completed"
+FILTER_ALL         = "all"
+FILTER_TODAY       = "today"
+FILTER_SCHEDULED   = "scheduled"
+FILTER_IMPORTANT   = "important"
+FILTER_COMPLETED   = "completed"
+FILTER_DATE_PREFIX = "date:"          # date:YYYY-MM-DD
 
 SYSTEM_FILTERS = [
     (FILTER_ALL,       "All reminders",  "\u25CE"),   # ◎
@@ -48,6 +64,17 @@ SYSTEM_FILTERS = [
     (FILTER_IMPORTANT, "Important",      "\u2605"),   # ★
     (FILTER_COMPLETED, "Completed",      "\u2713"),   # ✓
 ]
+
+SYSTEM_KEYS = {k for k, *_ in SYSTEM_FILTERS}
+
+
+def _date_from_filter(f: str) -> Optional[date]:
+    if not f or not f.startswith(FILTER_DATE_PREFIX):
+        return None
+    try:
+        return date.fromisoformat(f[len(FILTER_DATE_PREFIX):])
+    except ValueError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +184,33 @@ class MainWindow(QMainWindow):
         self.category_list.customContextMenuRequested.connect(self._on_category_context_menu)
         sb.addWidget(self.category_list, 1)
 
+        # Calendar in the bottom-left corner
+        cal_header_row = QHBoxLayout()
+        cal_header = QLabel("CALENDAR")
+        cal_header.setObjectName("SidebarSection")
+        cal_header_row.addWidget(cal_header)
+        cal_header_row.addStretch(1)
+        self.cal_clear_btn = QPushButton("Clear")
+        self.cal_clear_btn.setObjectName("GhostButton")
+        self.cal_clear_btn.setToolTip("Clear date filter")
+        self.cal_clear_btn.setVisible(False)
+        self.cal_clear_btn.clicked.connect(self._on_calendar_clear)
+        cal_header_row.addWidget(self.cal_clear_btn)
+        sb.addLayout(cal_header_row)
+
+        self.calendar = QCalendarWidget()
+        self.calendar.setObjectName("SidebarCalendar")
+        self.calendar.setGridVisible(False)
+        self.calendar.setNavigationBarVisible(True)
+        self.calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
+        self.calendar.setHorizontalHeaderFormat(QCalendarWidget.SingleLetterDayNames)
+        self.calendar.setFirstDayOfWeek(Qt.Monday)
+        self.calendar.setSelectionMode(QCalendarWidget.SingleSelection)
+        self.calendar.setFixedHeight(210)
+        self.calendar.clicked.connect(self._on_calendar_date)
+        self._highlighted_dates: set[QDate] = set()
+        sb.addWidget(self.calendar)
+
         # Bottom row: theme toggle
         theme_btn = QPushButton("\u263D  Dark mode")
         theme_btn.setObjectName("GhostButton")
@@ -241,9 +295,55 @@ class MainWindow(QMainWindow):
         self.palette_theme = palette
         QApplication.instance().setStyleSheet(stylesheet(palette))
         self.theme_btn.setText("\u2600  Light mode" if palette.name == "dark" else "\u263D  Dark mode")
+        if hasattr(self, "calendar"):
+            self._apply_calendar_theme()
 
     def _toggle_theme(self) -> None:
         self._apply_theme(DARK if self.palette_theme.name == "light" else LIGHT)
+        # Re-tint calendar highlights with the new accent color
+        if hasattr(self, "calendar"):
+            self._update_calendar_highlights()
+
+    def _apply_calendar_theme(self) -> None:
+        """Update QCalendarWidget's palette so day cells & headers follow the theme."""
+        p = self.palette_theme
+        text = QColor(p.text)
+        muted = QColor(p.text_muted)
+        faint = QColor(p.text_faint)
+        bg = QColor(p.panel)
+
+        # -- palette on the inner day-cell view --
+        pal = self.calendar.palette()
+        pal.setColor(QPalette.Base, bg)
+        pal.setColor(QPalette.AlternateBase, bg)
+        pal.setColor(QPalette.Window, bg)
+        pal.setColor(QPalette.Text, text)
+        pal.setColor(QPalette.WindowText, text)
+        pal.setColor(QPalette.ButtonText, text)
+        pal.setColor(QPalette.Highlight, QColor(p.accent))
+        pal.setColor(QPalette.HighlightedText, QColor("#FFFFFF"))
+        pal.setColor(QPalette.Disabled, QPalette.Text, faint)
+        pal.setColor(QPalette.Disabled, QPalette.WindowText, faint)
+        self.calendar.setPalette(pal)
+
+        view = self.calendar.findChild(QAbstractItemView)
+        if view is not None:
+            view.setPalette(pal)
+
+        # -- day-name header row (M T W T F S S) --
+        header_fmt = QTextCharFormat()
+        header_fmt.setForeground(QBrush(muted))
+        self.calendar.setHeaderTextFormat(header_fmt)
+
+        # -- weekday text colors (overrides Qt's default red weekends) --
+        weekday_fmt = QTextCharFormat()
+        weekday_fmt.setForeground(QBrush(text))
+        weekend_fmt = QTextCharFormat()
+        weekend_fmt.setForeground(QBrush(muted))
+        for day in (Qt.Monday, Qt.Tuesday, Qt.Wednesday, Qt.Thursday, Qt.Friday):
+            self.calendar.setWeekdayTextFormat(day, weekday_fmt)
+        for day in (Qt.Saturday, Qt.Sunday):
+            self.calendar.setWeekdayTextFormat(day, weekend_fmt)
 
     # -- sidebar refresh ---------------------------------------------------
 
@@ -275,6 +375,60 @@ class MainWindow(QMainWindow):
             if select_key == cat.id:
                 self.category_list.setCurrentItem(item)
         self.category_list.blockSignals(False)
+
+        # -- calendar highlights & selection
+        self._update_calendar_highlights()
+        target = _date_from_filter(self.current_filter)
+        if target is not None:
+            self.calendar.blockSignals(True)
+            self.calendar.setSelectedDate(QDate(target.year, target.month, target.day))
+            self.calendar.blockSignals(False)
+            self.cal_clear_btn.setVisible(True)
+        else:
+            self.cal_clear_btn.setVisible(False)
+
+    def _update_calendar_highlights(self) -> None:
+        """Bold + tinted date cells for days that have pending reminders."""
+        blank = QTextCharFormat()
+        for d in self._highlighted_dates:
+            self.calendar.setDateTextFormat(d, blank)
+        self._highlighted_dates.clear()
+
+        tint = QColor(self.palette_theme.accent)
+        tint.setAlpha(70)
+        fmt = QTextCharFormat()
+        fmt.setBackground(QBrush(tint))
+        font = QFont()
+        font.setBold(True)
+        fmt.setFont(font)
+
+        for r in self.store.reminders:
+            if r.done:
+                continue
+            dt = r.due_dt
+            if not dt:
+                continue
+            qd = QDate(dt.year, dt.month, dt.day)
+            if qd in self._highlighted_dates:
+                continue
+            self.calendar.setDateTextFormat(qd, fmt)
+            self._highlighted_dates.add(qd)
+
+    def _prefill_from_filter(self, r: Reminder) -> None:
+        """Set sensible defaults on a new reminder based on the current view."""
+        f = self.current_filter
+        if f in SYSTEM_KEYS:
+            if f == FILTER_IMPORTANT:
+                r.important = True
+            elif f == FILTER_TODAY:
+                r.due_dt = datetime.combine(date.today(), _time(9, 0))
+        elif f.startswith(FILTER_DATE_PREFIX):
+            target = _date_from_filter(f)
+            if target:
+                r.due_dt = datetime.combine(target, _time(9, 0))
+        else:
+            # user-created category id
+            r.category_id = f
 
     def _compute_counts(self) -> dict[str, int]:
         today = date.today()
@@ -316,6 +470,11 @@ class MainWindow(QMainWindow):
         elif f == FILTER_IMPORTANT:
             if not r.important:
                 return False
+        elif f.startswith(FILTER_DATE_PREFIX):
+            target = _date_from_filter(f)
+            dt = r.due_dt
+            if not target or not dt or dt.date() != target:
+                return False
         else:
             # category id
             if r.category_id != f:
@@ -337,6 +496,12 @@ class MainWindow(QMainWindow):
         for key, label, _ in SYSTEM_FILTERS:
             if key == f:
                 return label, ""
+        target = _date_from_filter(f)
+        if target:
+            today = date.today()
+            if target == today:
+                return target.strftime("%A, %d %b"), "Today"
+            return target.strftime("%A, %d %b %Y"), "Selected date"
         cat = self.store.category(f)
         if cat:
             return cat.name, "My list"
@@ -410,6 +575,7 @@ class MainWindow(QMainWindow):
         self.category_list.blockSignals(False)
         _, key = item.data(Qt.UserRole)
         self.current_filter = key
+        self.cal_clear_btn.setVisible(False)
         self._refresh_list()
 
     def _on_category_selection(self) -> None:
@@ -421,6 +587,26 @@ class MainWindow(QMainWindow):
         self.system_list.blockSignals(False)
         _, cat_id = item.data(Qt.UserRole)
         self.current_filter = cat_id
+        self.cal_clear_btn.setVisible(False)
+        self._refresh_list()
+
+    def _on_calendar_date(self, qdate: QDate) -> None:
+        py_date = qdate.toPython()
+        self.current_filter = FILTER_DATE_PREFIX + py_date.isoformat()
+        # Deselect system/category lists so nothing looks doubly-active
+        self.system_list.blockSignals(True)
+        self.system_list.clearSelection()
+        self.system_list.blockSignals(False)
+        self.category_list.blockSignals(True)
+        self.category_list.clearSelection()
+        self.category_list.blockSignals(False)
+        self.cal_clear_btn.setVisible(True)
+        self._refresh_list()
+
+    def _on_calendar_clear(self) -> None:
+        self.current_filter = FILTER_ALL
+        self.cal_clear_btn.setVisible(False)
+        self._refresh_sidebar(select_key=FILTER_ALL)
         self._refresh_list()
 
     def _on_category_context_menu(self, pos) -> None:
@@ -470,14 +656,7 @@ class MainWindow(QMainWindow):
         if not title:
             return
         r = Reminder(title=title)
-        # If viewing a category, default to it
-        if self.current_filter not in {k for k, *_ in SYSTEM_FILTERS}:
-            r.category_id = self.current_filter
-        if self.current_filter == FILTER_IMPORTANT:
-            r.important = True
-        if self.current_filter == FILTER_TODAY:
-            from datetime import time as _time
-            r.due_dt = datetime.combine(date.today(), _time(9, 0))
+        self._prefill_from_filter(r)
         self.store.add(r)
         self.quick_edit.clear()
         self._refresh_sidebar(select_key=self.current_filter)
@@ -485,11 +664,7 @@ class MainWindow(QMainWindow):
 
     def _on_new_detailed(self) -> None:
         r = Reminder()
-        # Preselect current category if applicable
-        if self.current_filter not in {k for k, *_ in SYSTEM_FILTERS}:
-            r.category_id = self.current_filter
-        if self.current_filter == FILTER_IMPORTANT:
-            r.important = True
+        self._prefill_from_filter(r)
         dlg = ReminderEditor(self.store, None, self)
         dlg.reminder = r
         dlg._populate()
